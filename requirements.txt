@@ -1,0 +1,8 @@
+streamlit
+psycopg2-binary
+pandas
+plotly
+google-generativeai
+requests
+opencv-python-headless
+numpy
