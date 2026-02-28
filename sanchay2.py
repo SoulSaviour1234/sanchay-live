@@ -20,6 +20,11 @@ from database2 import (
     predict_category, update_user_salary, upgrade_user_to_premium  # <--- ADD THIS
 )
 
+# --- CLOUD TIMEZONE FIX (Forces IST) ---
+os.environ['TZ'] = 'Asia/Kolkata'
+if hasattr(time, 'tzset'):
+    time.tzset()
+
 # --- NEW: AI TOOL FOR UPDATING BUDGETS ---
 def update_category_budget_ai(username, category, new_limit):
     """Updates the monthly budget limit for a single category (Food, Transport, Shopping, Bills, Other)."""
