@@ -1,8 +1,9 @@
 streamlit
-psycopg2-binary
 pandas
 plotly
 google-generativeai
-requests
-opencv-python-headless
+psycopg2-binary
+Pillow
+pyzbar
 numpy
+opencv-python-headless

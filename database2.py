@@ -7,6 +7,7 @@ import re
 import datetime
 import google.generativeai as genai
 import streamlit as st # <--- ADD THIS LINE HERE
+import time
 GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 genai.configure(api_key=GEMINI_API_KEY)
 
@@ -279,11 +280,11 @@ def get_user_data(username):
         }
     return None
 
-@st.cache_data(ttl=86400)
+
+# REMOVED @st.cache_data completely so it has to think fresh every time!
 def predict_category(description):
     """Uses Gemini to predict the best category for a manual or SMS entry."""
-    # Ensure you are using the same model as your Sanchay AI
-    model = genai.GenerativeModel('gemini-2.5-flash') # Use the same model as in sanchay.py
+    model = genai.GenerativeModel('gemini-2.5-flash') 
     
     prompt = f"""
     Classify the following expense into exactly ONE of these categories: 
@@ -295,13 +296,19 @@ def predict_category(description):
     """
     try:
         response = model.generate_content(prompt)
-        # Clean the response to match your database options
-        category = response.text.strip()
-        if category in ["Food", "Transport", "Shopping", "Bills", "Other"]:
-            return category
+        raw_text = str(response.text).lower()
+        
+        # Smart Cleaner
+        for c in ["Food", "Transport", "Shopping", "Bills", "Other"]:
+            if c.lower() in raw_text:
+                return c
+                
         return "Other"
+        
     except Exception as e:
-        # Fallback to 'Other' if the AI is offline
+        # THE FIX: Stop silently hiding API errors! Show it on the screen.
+        st.toast(f"⚠️ AI API Error: {e}", icon="🚨")
+        time.sleep(1) # Let the user read the error message
         return "Other"
 
 # --- Add this to the bottom of database.py ---

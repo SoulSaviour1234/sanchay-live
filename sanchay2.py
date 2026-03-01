@@ -9,6 +9,10 @@ import json
 import pandas as pd
 import plotly.express as px
 import google.generativeai as old_genai
+import numpy as np  # <--- ADD THIS
+import cv2          # <--- ADD THIS
+from PIL import Image
+from pyzbar.pyzbar import decode  
 # Add your new functions to the import list
 # Update your import line (around Line 15) to include the new function
 from database2 import (
@@ -60,17 +64,38 @@ def generate_gst_report(df):
     return df
 
 def decode_upi_qr(image_file):
-    """Decodes a UPI QR image and returns the payment URI."""
-    file_bytes = np.asarray(bytearray(image_file.read()), dtype=np.uint8)
-    img = cv2.imdecode(file_bytes, 1)
-    
-    # Initialize the QR code detector
-    detector = cv2.QRCodeDetector()
-    data, bbox, straight_qrcode = detector.detectAndDecode(img)
-    
-    if data:
-        # UPI URIs look like: upi://pay?pa=address@bank&pn=Name...
-        return data
+    """Decodes a UPI QR using a multi-step aggressive scanning method."""
+    try:
+        # IMPORTANT: Reset the file buffer so we can read it multiple times
+        image_file.seek(0)
+        
+        # METHOD 1: Try reading the raw image first using PIL
+        img_pil = Image.open(image_file)
+        decoded = decode(img_pil)
+        if decoded:
+            return decoded[0].data.decode('utf-8')
+            
+        # IMPORTANT: Reset buffer again for OpenCV
+        image_file.seek(0)
+        file_bytes = np.asarray(bytearray(image_file.read()), dtype=np.uint8)
+        img_cv = cv2.imdecode(file_bytes, 1)
+        
+        if img_cv is not None:
+            # METHOD 2: Grayscale (Kills color glare)
+            gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+            decoded = decode(gray)
+            if decoded:
+                return decoded[0].data.decode('utf-8')
+                
+            # METHOD 3: Otsu's Thresholding (Forces pure Black & White)
+            _, thresh = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+            decoded = decode(thresh)
+            if decoded:
+                return decoded[0].data.decode('utf-8')
+
+    except Exception as e:
+        st.error(f"Image processing error: {e}")
+        
     return None
 
 # --- NEW: Tool for the AI to check affordability ---
@@ -373,6 +398,7 @@ def login_page():
             if login_user(user, passwd):
                 st.session_state.logged_in = True
                 st.session_state.user = user
+                st.rerun()
             else:
                 st.error("Invalid Username or Password")
 
@@ -406,6 +432,7 @@ else:
     
     if st.sidebar.button("Logout"):
         st.session_state.logged_in = False
+        st.rerun()
 
     
 
@@ -483,7 +510,7 @@ else:
         with st.expander("⚡ Scan & Pay (UPI)", expanded=False):
             st.write("Scan a QR code to pay via GPay or PhonePe")
             # NEW: Toggle between Live Camera and File Upload
-            mode = st.radio("Choose Scanner Mode", ["Upload Image", "Live Camera"], horizontal=True)
+            mode = st.radio("Choose Scanner Mode", ["Upload Image","Live Camera"], horizontal=True)
             qr_data = None
             if mode == "Live Camera":
                 # This opens the actual camera feed in the browser
@@ -539,7 +566,6 @@ else:
                         </a>
                     """, unsafe_allow_html=True)
                     st.toast(f"Details saved for {merchant}! Log it when you return.", icon="📝")
-                    st.rerun()
                 
         
     
@@ -583,6 +609,7 @@ else:
                 amt = st.number_input("Amount (₹)", min_value=0.0,
                                  value=st.session_state.get('temp_amt', 0.0), step=10.0,
                                  key=f"amt_input_{st.session_state.w_version}")
+            
             with col2:
                 desc = st.text_input("Description (with AI Categorization)", placeholder="e.g. Metro fare", 
                                 value=st.session_state.get('temp_desc', ""), key=f"manual_desc_input_{st.session_state.w_version}")
@@ -591,11 +618,28 @@ else:
                 # or rely on the fact that Streamlit only triggers when the user hits 'Enter'
                 if desc and desc != st.session_state.get('last_processed_desc'):
                     with st.spinner("AI Categorizing..."):
-                        # Now it will only run when the description actually changes!
                         predicted = predict_category(desc)
-                        st.session_state.temp_cat = predicted
+                        
+                        # --- NEW: BULLETPROOF AI CLEANER ---
+                        # Scans the AI's messy string for your exact keywords
+                        valid_categories = ["Food", "Transport", "Shopping", "Bills", "Other"]
+                        final_cat = "Other" # Default fallback
+                        
+                        for c in valid_categories:
+                            if c.lower() in str(predicted).lower():
+                                final_cat = c
+                                break
+                                
+                        st.session_state.temp_cat = final_cat
                         st.session_state.last_processed_desc = desc
+                        
+                        # Keep the memory fixes we added earlier!
+                        st.session_state.temp_amt = amt 
+                        st.session_state.temp_desc = desc 
+                        
                         st.session_state.w_version += 1
+                        st.rerun()
+                        
                     
             with col3:
                 # Use .index() to find the position of the predicted category
@@ -628,17 +672,26 @@ else:
                     # Clear the "temp" session state after saving
                     if 'temp_amt' in st.session_state: del st.session_state.temp_amt
                     if 'temp_desc' in st.session_state: del st.session_state.temp_desc
+                    
+                    # NEW: Tell the app to fetch the fresh data from the database
+                    st.session_state.refresh_data = True
                 
                     st.success(f"Added: {desc} of Rs. {amt} to {cat}")
                     st.success(f"✅ {'Business' if is_biz else 'Personal'} expense logged!")
+                    time.sleep(1) # Give the user a second to read the success message
+                    st.rerun()
                 else:
                     st.error("Please enter a description.")
                 
         # --- Step 3: Responsive Dashboard Logic ---
         # FETCH DATA FROM DATABASE HERE
         # Pass the session state user to filter the database
-        data_list = get_all_expenses(st.session_state.user)
-        df = pd.DataFrame(data_list)
+        # --- NEW: BLAZING FAST DATABASE CACHING ---
+        # Only fetch from the cloud if we just logged in, or just saved a new record!
+        if 'vault_data' not in st.session_state or st.session_state.get('refresh_data', True):
+            st.session_state.vault_data = get_all_expenses(st.session_state.user)
+            st.session_state.refresh_data = False
+        df = pd.DataFrame(st.session_state.vault_data)
     
         # Initialize dashboard variables with defaults
         total_spent = 0.0
@@ -720,11 +773,12 @@ else:
                         c1, c2 = st.columns([1.5, 1], vertical_alignment="top")
                         with c1:
                             st.write("#### Category Breakdown")
-                            fig = px.pie(df, values='amount', names='category', hole=0.4, color_discrete_sequence=px.colors.sequential.RdBu)
+                            # Change this line under "#### Category Breakdown"
+                            fig = px.pie(today_df, values='amount', names='category', hole=0.4, color_discrete_sequence=px.colors.sequential.RdBu)
                             st.plotly_chart(fig, use_container_width=True)
                         with c2:
                             st.write("#### Insights")
-                            st.info(f"Main Expense: **{df.groupby('category')['amount'].sum().idxmax()}**")
+                            st.info(f"Main Expense: **{today_df.groupby('category')['amount'].sum().idxmax()}**")
                             m1.metric("Total Spent", f"₹{total_spent:.2f}", delta=f"-₹{total_spent}", delta_color="inverse")
                             m2.metric("Remaining Balance", f"₹{remaining:.2f}", delta=f"₹{remaining}")
                             # Winner logic integrated here
@@ -856,11 +910,67 @@ else:
                 
                 elif page == "📋 Manage Records":
                     st.write("### Expense Records")
-                    # data_editor lets you modify records without writing new code!
-                    edited_df = st.data_editor(df, use_container_width=True, num_rows="dynamic", hide_index=False)
+                    
+                    # --- NEW: DATE FILTER SYSTEM ---
+                    if not df.empty:
+                        # Safely convert the database strings to real datetime objects
+                        df['real_date'] = pd.to_datetime(df['date'], errors='coerce').dt.date
+                        
+                        # Find the absolute oldest record to set as the default start date
+                        oldest_date = df['real_date'].min()
+                        today_date = datetime.date.today()
+                        
+                        # Build the UI
+                        st.write("##### 📅 Filter Vault by Date")
+                        f_col1, f_col2 = st.columns(2)
+                        with f_col1:
+                            start_date = st.date_input("From Date", value=oldest_date)
+                        with f_col2:
+                            end_date = st.date_input("To Date", value=today_date)
+                            
+                        # Apply the math mask to filter the spreadsheet
+                        mask = (df['real_date'] >= start_date) & (df['real_date'] <= end_date)
+                        filtered_df = df.loc[mask].drop(columns=['real_date', 'date_dt'], errors='ignore')
+                    else:
+                        filtered_df = df.copy()
+
+                    # Feed the strictly FILTERED data to the data_editor
+                    edited_df = st.data_editor(filtered_df, use_container_width=True, num_rows="dynamic", hide_index=False)
+                    
+                    # --- THE CLOUD-SYNC BUTTON ---
                     if st.button("Apply Changes", use_container_width=True):
-                        st.session_state.exp_list = edited_df.to_dict('records')
-                    # Refresh to update the charts
+                        with st.spinner("Syncing to Neon Cloud..."):
+                            
+                            # 1. Handle Edits 
+                            for i in range(len(edited_df)):
+                                # THE FIX: Unwrap the NumPy types into standard Python types
+                                row_id = int(edited_df.iloc[i]['id']) 
+                                
+                                orig_row = df[df['id'] == row_id]
+                                
+                                if not orig_row.empty:
+                                    orig_amt = float(orig_row.iloc[0]['amount'])
+                                    orig_desc = str(orig_row.iloc[0]['description'])
+                                    orig_cat = str(orig_row.iloc[0]['category'])
+                                    
+                                    new_amt = float(edited_df.iloc[i]['amount'])
+                                    new_desc = str(edited_df.iloc[i]['description'])
+                                    new_cat = str(edited_df.iloc[i]['category'])
+                                    
+                                    if orig_amt != new_amt or orig_desc != new_desc or orig_cat != new_cat:
+                                        edit_expense_in_db(row_id, amount=new_amt, description=new_desc, category=new_cat)
+                            
+                            # 2. Handle Deletions
+                            orig_ids = set(filtered_df['id'])
+                            new_ids = set(edited_df['id'])
+                            for missing_id in (orig_ids - new_ids):
+                                # THE FIX: Ensure the ID is a standard integer before deleting
+                                delete_expense_from_db(int(missing_id))
+                                
+                        st.session_state.refresh_data = True
+                        st.success("✅ Changes permanently saved to your Vault!")
+                        time.sleep(1)
+                        st.rerun()
                     
                     # --- RESTORED: Monthly Budget Envelopes Section ---
                     st.divider()
@@ -920,13 +1030,19 @@ else:
                                     # Maps sub data to your existing expense tool
                                     add_expense_to_db(st.session_state.user, today_date, amt, f"Renewal: {name}", "Bills")
                                     delete_subscription_from_db(sub_id)
+                                    st.session_state.refresh_data = True # <--- ADD THIS
                                     st.success(f"Added {name} to your expenses under Bills!")
+                                    time.sleep(1)
+                                    st.rerun() # <--- AND ADD THIS
                         
                             with s_col3:
                                 # CANCEL: Wipes the record from the cloud
                                 if st.button("❌ Cancel", key=f"can_{sub_id}", use_container_width=True):
                                     delete_subscription_from_db(sub_id)
+                                    st.session_state.refresh_data = True # <--- ADD THIS
                                     st.warning(f"Subscription {name} removed.")
+                                    time.sleep(1)
+                                    st.rerun() # <--- AND ADD THIS
                         
                                 st.divider()
                     
@@ -1151,6 +1267,10 @@ else:
                         # NEW: Permanent save to Neon
                         save_user_limits(st.session_state.user, updated_limits)
                         st.success("Limits Saved for the month!")
+                        
+                        # --- THE FIX ---
+                        time.sleep(1) # Let the user see the success message
+                        st.rerun()    # Instantly redraw the screen with the new limits!
                     pass
 
                 with st.expander("💳 Add New Subscription"):
